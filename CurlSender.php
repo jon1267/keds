@@ -7,9 +7,6 @@
  * $curl=CurlSender::init($link); $res = $curl->get();
  * $status = $curl->getStatus(); $curl->close();
  * в $res будет результат запроса, в $status http статус код.
- * Добавлено: $curl=CurlSender::init($link, 1) использ c proxy,
- * тогда д.б. указаны 4 параметра  $this->$proxy...
- * Если просто $curl=CurlSender::init($link); - это запрос без proxy.
  *
  * @package App\Services\curl
  */
@@ -56,7 +53,7 @@ class CurlSender
         curl_setopt($this->curl, CURLOPT_RETURNTRANSFER, true);
         //curl_setopt($this->curl, CURLOPT_URL, $this->url);
 
-        // для запроса на bearer token нужно http_build_query($data) и $data: php array
+        // для запроса на Sdek: bearer token нужно http_build_query($data) и $data: php array
         // а для запроса на регистрацию заказа $data должна быть json string
         ($isJsonData == 0) ?
         curl_setopt($this->curl, CURLOPT_POSTFIELDS,  http_build_query($data) ) :
@@ -65,6 +62,16 @@ class CurlSender
         curl_setopt($this->curl, CURLOPT_HTTPHEADER, $this->headers );
 
         return curl_exec($this->curl); //json_decode(curl_exec($this->curl));
+    }
+
+    // delete order (token in header, order Uuid send in url, as get param)
+    public function delete()
+    {
+        curl_setopt($this->curl, CURLOPT_CUSTOMREQUEST, "DELETE");
+        curl_setopt($this->curl, CURLOPT_HTTPHEADER, $this->headers );
+        curl_setopt($this->curl, CURLOPT_RETURNTRANSFER, true);
+
+        return curl_exec($this->curl);
     }
 
 
