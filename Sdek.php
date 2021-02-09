@@ -9,6 +9,7 @@ class Sdek
     const SDEK_DELIVERY_POINTS = 'http://api.cdek.ru/v2/deliverypoints?';
     const SDEK_REGION_CODES = 'https://api.edu.cdek.ru/v2/location/regions?';
     const SDEK_CITY_CODES = 'https://api.edu.cdek.ru/v2/location/cities/?';
+    const RECEIPT_REQUEST_LINK = 'https://api.edu.cdek.ru/v2/print/orders';
     const CLIENT_ID = 'epT5FMOa7IwjjlwTc1gUjO1GZDH1M1rE';
     const CLIENT_SECRET = 'cYxOu9iAMZYQ1suEqfEvsHld4YQzjY0X';
 
@@ -76,6 +77,7 @@ class Sdek
             'sender' => [ 'name' => "Петров Петр"],
             'services' =>  [ [ 'code' => "DELIV_WEEKEND" ] ],
             'tariff_code' => 137,
+            'print' => 'barcode', //если это указать то сразу формируется pdf с ШК места
         ];
     }
 
@@ -180,7 +182,7 @@ class Sdek
         return $result;
     }
 
-    // get created order info. Need token & order uuid.
+    // get fool info about created order. Need order uuid.
     public function orderInfo(string $orderUuid)
     {
         $curl = CurlSender::init(self::ORDER_INFO_LINK . $orderUuid);
@@ -199,6 +201,20 @@ class Sdek
         }
 
         return $result;
+    }
+
+    // get (one) order last status (if success, return stdClass Object)
+    public function orderLastStatus(string $orderUuid)
+    {
+        $statusInfo = $this->orderInfo($orderUuid);
+        return array_pop($statusInfo->entity->statuses);
+    }
+
+    // get all order statuses (if success, return array of stdClass Objects)
+    public function orderAllStatuses(string $orderUuid)
+    {
+        $statusInfo = $this->orderInfo($orderUuid);
+        return $statusInfo->entity->statuses ?? null;
     }
 
     // delete order
@@ -244,8 +260,8 @@ class Sdek
     }
 
     // возвращает массив (сокращенный до ['code','name','address']) офисов СДЕК по почтовому индексу Города(!)
-    // тут даются индексы типа '308000-Белгород', '350000-Краснодар', '190000 Санкт-Петербугр' итд. если дать
-    // обычный почтовый индекс типа 121609 - все равно вернется список офисов SDEK для этого города.
+    // тут даются индексы типа '308000'-Белгород, '350000'-Краснодар, '190000' Санкт-Петербург итд. Если дать
+    // обычный почтовый индекс типа 121609 - все равно вернется список офисов SDEK для ВСЕГО этого города.
     public function getPostOffices($index='')
     {
         if ($index == '') return [];
@@ -259,6 +275,9 @@ class Sdek
                 $offices[$key]['code'] = $post->code;
                 $offices[$key]['name'] = $post->name;
                 $offices[$key]['address_comment'] = $post->address_comment;
+                $offices[$key]['city_code'] = $post->location->city_code;
+                $offices[$key]['address_full'] = $post->location->address_full;
+                $offices[$key]['postal_code'] = $post->location->postal_code;
             }
         }
 
@@ -287,6 +306,8 @@ class Sdek
         return $result;
     }
 
+    // возвращает для полностью и правильно указанного города все коды SDEK для этого города:
+    // код города, код региона, широту, долготу и массив почтовых индексов города (все по sdek)
     public function getSdekCityCodes( $city = 'Белгород') {
         $data=['city'=> $city];
         $curl = CurlSender::init(self::SDEK_CITY_CODES . http_build_query($data));
@@ -306,6 +327,40 @@ class Sdek
 
         return $result;
     }
+
+    // список городов SDEK по 2 значному коду страны, можно с кодом региона SDEK (можно без)
+    //$data = ['country_codes' => 'RU', 'region_code' => 16, 'size' => 1000 ,'page' => 1];
+    //$data = ['country_codes' => 'RU', 'size' => 1000 ,'page' => 0];
+    public function getSdekAllCities($data)
+    {
+        $curl = CurlSender::init(self::SDEK_CITY_CODES . http_build_query($data));
+        $curl->setHeaders([
+            'Content-Type: application/json',
+            'Authorization: Bearer '. $this->getToken(),
+        ]);
+        $res = $curl->get();
+        $status = $curl->getStatus();
+        $result = json_decode($res);
+        $error = $curl->getError();
+        $curl->close();
+
+        if (!in_array($status, [200,201, 202, 204, 205])) {
+            return ['result' => $result, 'status' => $status, 'error' => $error];
+        }
+
+        $cities = [];
+        if (count($result)) {
+            foreach ($result as $key => $value) {
+                $cities[$key]['code'] = $value->code;
+                $cities[$key]['city'] = $value->city;
+                $cities[$key]['region'] = $value->region;
+                $cities[$key]['region_code'] = $value->region_code;
+                $cities[$key]['sub_region'] = $value->sub_region;
+            }
+        }
+
+        return $cities;
+    } 
 
     // заказ штрих кода места
     public function barcodeRequest(string $orderUuid)
@@ -354,21 +409,89 @@ class Sdek
         return $result;
     }
 
-    public function printBarcode(string $pdfLink)
+    //public function printBarcode(string $pdfLink)
+    public function printPdf(string $pdfLink)
     {
         $curl = CurlSender::init($pdfLink);
-        /*$curl->setHeaders([
+        $curl->setHeaders([
             'Content-Type: application/pdf',
             'Authorization: Bearer '. $this->getToken()
-        ]);*/
+        ]);
 
-        header('Authorization: Bearer '. $this->getToken());
         header("Content-type: application/pdf");
 
         print $curl->get();
         $curl->close();
 
         exit;
+    }
+
+    /**
+     * Формирование квитанции (pdf) к заказу. Параметр: или массив в к-ром 1 или больше
+     * (но не более 100 - документация sdek api) orders Uuid, или строка с одним order_uuid.
+     * Массив заказов $orders предполагается в виде:
+     *   $orders = [
+     *       ['order_uuid' => '72753031-7987-4d53-a358-8e52771bb55b'],
+     *       ['order_uuid' => '72753031-31c8-4141-8fbc-c282e5e71781'],
+     *       ['order_uuid' => '72753031-84ba-4796-b20d-7d0d478eb035'],
+     *   ];
+     * Если заказ один, то можно параметром указать строку с order_uuid
+     *
+     * @param $orders
+     * @return mixed
+     **/
+    public function receiptRequest($orders)
+    {
+        $curl = CurlSender::init(self::RECEIPT_REQUEST_LINK);
+        $curl->setHeaders([
+            'Content-Type: application/json',
+            'Authorization: Bearer '. $this->getToken()
+        ]);
+
+        // 2-а if, чтоб параметр мог быть $orders[] и (string) $orderUuid
+        $data = '';
+        if (is_string($orders)) {
+            $data = json_encode(['orders' => ['order_uuid' => $orders,], 'copy_count' => 2,]);
+        }
+
+        if (is_array($orders)) {
+            $data = json_encode(['orders' => $orders, 'copy_count' => 2,]);
+        }
+
+        $res = $curl->post($data,1);
+        $status = $curl->getStatus();
+        $result = json_decode($res);
+        $error = $curl->getError();
+        $curl->close();
+
+        if (!in_array($status, [200,201, 202, 204, 205])) {
+            return ['result' => $result, 'status' => $status, 'error' => $error];
+        }
+
+        return $result;
+    }
+
+    // Получение квитанции к заказу. Если success и pdf сформировался (время...), то в ответе вернется
+    // объект $entity в котором будет $entity->url - ссылка на pdf файл. тут только ссылка. печать отдельно.
+    // параметр - строка uuid ($entity->uuid а не $request->...) вернувшаяся из receiptRequest([])
+    public function receiptReceive(string $receiptUuid)
+    {
+        $curl = CurlSender::init(self::RECEIPT_REQUEST_LINK .'/'. $receiptUuid);
+        $curl->setHeaders([
+            'Content-Type: application/json',
+            'Authorization: Bearer '. $this->getToken(),
+        ]);
+        $res = $curl->get();
+        $status = $curl->getStatus();
+        $result = json_decode($res);
+        $error = $curl->getError();
+        $curl->close();
+
+        if (!in_array($status, [200,201, 202, 204, 205])) {
+            return ['result' => $result, 'status' => $status, 'error' => $error];
+        }
+
+        return $result;
     }
 
     // this return bearer token, or null
